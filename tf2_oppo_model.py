@@ -10,6 +10,9 @@ import time
 import sys
 import csv
 import types
+import pickle
+import random
+
 from tensorflow.core.protobuf import rewriter_config_pb2
 
 from tensorflow.python.client import timeline
@@ -22,6 +25,17 @@ from datetime import datetime
 
 #os.environ['TF_CPP_MIN_LOG_LEVEL'] = '0'
 #tf.logging.set_verbosity(tf.logging.DEBUG)
+SEED = 42
+
+random.seed(SEED)
+np.random.seed(SEED)
+#rng = np.random.RandomState(2021)
+print(np.random.rand(5))
+
+# Fix TensorFlow graph-level seed for reproducibility
+#tf1.set_random_seed(SEED)
+
+
 
 
 now = datetime.utcnow().strftime("%Y%m%d%H%M%S")
@@ -31,10 +45,11 @@ logdir = "{}/run-{}/".format(root_logdir, now)
 
 export_savedmodel = 0 #1
 
-profile =10
+profile =0
 timeline_cnt = 0 #10
 core = 8
 BS = 256
+loops = 1000
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', type=str,
@@ -63,6 +78,13 @@ parser.add_argument('--bs', type=int,
                     dest='bs',
                     default=1000,
                     required=False)
+
+parser.add_argument('--training', type=int,
+                    help='inference or training',
+                    dest='is_training',
+                    default=True,
+                    required=False)
+
 
 args = parser.parse_args()
 
@@ -93,6 +115,7 @@ def get_graph_input_output(args):
     with tf1.Session(config=config) as sess:
         g = tf1.Graph().as_default()
         
+       
         inputs_dict = {}
         feed_dict = {}
        
@@ -129,6 +152,8 @@ def get_graph_input_output(args):
                    
                    if (in_tensor.dtype == "float32"):  #float point
                        feed_dict[in_tensor] = np.random.rand(*shape)
+
+
                    elif (in_tensor.dtype == "int64"):
                        feed_dict[in_tensor] = np.random.randint(1, 1000, size = shape)
                    elif (in_tensor.dtype == "int32"):
@@ -151,6 +176,9 @@ def get_graph_input_output(args):
             #train graph for oppo 
             meta_graph = tf1.saved_model.loader.load(sess, ["train"], pb_file) 
             #sess.run('init_all_tables')
+            
+      
+            tf1.set_random_seed(SEED)
     
             #get inputs maps
             #inputs = meta_graph.signature_def['serving_default'].inputs
@@ -158,8 +186,9 @@ def get_graph_input_output(args):
             inputs = meta_graph.signature_def['serving'].inputs
             
             count = 0
-               
-            for k,v in inputs.items():
+            
+              
+            for k,v in sorted(inputs.items()):
                 count += 1
                 
                 dim0 = v.tensor_shape.dim[0].size
@@ -175,8 +204,12 @@ def get_graph_input_output(args):
                
                 if (v.dtype == 1):  #float point
                     feed_dict[input_x] = np.random.rand(*shape)
+                    #feed_dict[input_x] = rng.rand(*shape)
+                    #print(input_x.name, feed_dict[input_x][1])
+                
                 elif (v.dtype == 9):
                     feed_dict[input_x] = np.random.randint(1, 1000, size = shape)
+                    #feed_dict[input_x] = rng.randint(1, 1000, size = shape)
                 elif (v.dtype == 7):
                     feed_dict[input_x] = np.array(['xxxxxx'])
                 else :
@@ -216,7 +249,7 @@ def run_inference(graph, feed_dict, fetch_):
        #sys.exit()
 
        # Test
-       loops = 200
+       #loops = 1000
        print('start benchmark')
        start = time.time()
        for _ in range(loops):
@@ -247,6 +280,11 @@ def run_inference(graph, feed_dict, fetch_):
                ctf = tl.generate_chrome_trace_format()
                with open('timeline.json', 'w') as f:
                    f.write(ctf)
+        
+       ret = sess1.run(fetches = fetch_, feed_dict= feed_dict)
+
+       return ret
+
 
 def run_train(graph, inputs_dict, outputs_dict, feed_dict, fetch):
     
@@ -281,7 +319,7 @@ def run_train(graph, inputs_dict, outputs_dict, feed_dict, fetch):
            result = sess1.run(fetches = grad, feed_dict = feed_dict)
        
        # Test
-       loops = 200
+       #loops = 200
        print('start benchmark')
        start = time.time()
        for _ in range(loops):
@@ -364,11 +402,24 @@ def edit_graph(graph):
 if __name__ == "__main__":
 
     graph, inputs_dict, feed_dict, outputs_dict, fetch = get_graph_input_output(args)
-
-    #run_inference(graph, feed_dict, fetch)
-   
-    trainable_vars = edit_graph(graph) 
     
-    run_train(graph, inputs_dict, outputs_dict, feed_dict, trainable_vars)
+    if args.is_training :
+        trainable_vars = edit_graph(graph) 
+        run_train(graph, inputs_dict, outputs_dict, feed_dict, trainable_vars)
+    else :
+        ret = run_inference(graph, feed_dict, fetch)
+         
+        feed_ = {}
+        for k,v in feed_dict.items():
+            feed_[k.name] = v
+            #print(k, v[1])
 
-   
+        if args.data_type == "float32" : 
+            f = open("feed_dict_f32.pkl","wb")
+            pickle.dump(feed_, f)
+            np.save("float32.npy",ret)
+        else :
+            f = open("feed_dict_bf16.pkl","wb")
+            pickle.dump(feed_, f)
+            np.save("bfloat16.npy",ret)
+        #print(ret) 
